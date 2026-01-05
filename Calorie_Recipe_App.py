@@ -179,10 +179,9 @@ def ask_ai(prompt, image=None, json_mode=False):
 if 'app_data' not in st.session_state:
     st.session_state.app_data = fetch_user_data()
 
-# --- SIDEBAR ---
-with st.sidebar:
-    st.title("🔥 FitChef Pro")
-    if not st.session_state.get('is_verified'):
+# --- AUTH & SETUP (Hidden in Expander for cleanliness) ---
+if not st.session_state.get('is_verified'):
+    with st.expander("🔐 Connect AI Key (Click to Open)", expanded=True):
         k = st.text_input("Gemini API Key", type="password")
         if k:
             try:
@@ -193,9 +192,34 @@ with st.sidebar:
                 st.success("Connected")
             except:
                 st.error("Invalid Key")
-    
-    st.divider()
-    nav = st.radio("Go to", ["Dashboard", "Fuel (Hydration)", "Plan (Shopping)", "Smart Chef", "Cheat Negotiator"])
+
+# --- MOBILE-FRIENDLY NAVIGATION (Horizontal) ---
+# We use columns to create a "Tab bar" feel at the top
+nav_options = ["🏠 Home", "💧 Fuel", "🛒 Plan", "👨‍🍳 Chef", "😈 Cheat"]
+# Store selection in session state so it persists
+if 'nav_selection' not in st.session_state:
+    st.session_state.nav_selection = "🏠 Home"
+
+# Create clickable columns
+cols = st.columns(5)
+for i, option in enumerate(nav_options):
+    if cols[i].button(option):
+        st.session_state.nav_selection = option
+
+# Map the selection to your code's logic
+selected_nav = st.session_state.nav_selection
+
+# Mapping dictionary to match your if/elif blocks
+nav_map = {
+    "🏠 Home": "Dashboard",
+    "💧 Fuel": "Fuel (Hydration)",
+    "🛒 Plan": "Plan (Shopping)",
+    "👨‍🍳 Chef": "Smart Chef",
+    "😈 Cheat": "Cheat Negotiator"
+}
+nav = nav_map[selected_nav]
+
+# --- (Rest of your app logic starts here: if nav == "Dashboard": ...) ---
 
 # =========================================================
 # 1. DASHBOARD
@@ -463,3 +487,4 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data)
             st.rerun()
+
