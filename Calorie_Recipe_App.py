@@ -613,15 +613,30 @@ elif nav == "Plan (Shopping)":
 
     # Categorized View
     categories = ["Protein", "Veg", "Dairy", "Grain", "Staple", "Junk", "General"]
+
+    # Pre-calculate indices to ensure unique keys even for duplicate items
+    # Map category -> list of (original_index, item_dict)
+    cat_map = {c: [] for c in categories}
+    for i, item in enumerate(shop_list):
+        c = item.get('category', 'General')
+        if c in cat_map:
+            cat_map[c].append((i, item))
+        else:
+            # Fallback for unknown categories
+            if "General" not in cat_map: cat_map["General"] = []
+            cat_map["General"].append((i, item))
+
     for cat in categories:
-        items = [x for x in shop_list if x.get('category', 'General') == cat]
-        if not items: continue
+        items_with_idx = cat_map.get(cat, [])
+        if not items_with_idx: continue
+
         st.subheader(f"{cat}")
-        for item in items:
+        for original_idx, item in items_with_idx:
             if item['bought']: continue
             rc1, rc2, rc3 = st.columns([0.5, 3, 1])
 
-            if rc1.checkbox("", key=f"chk_{item['item']}"):
+            # Use original_idx in key to handle duplicates (e.g. 2x "Chicken")
+            if rc1.checkbox("", key=f"chk_{original_idx}_{item['item']}"):
                 item['bought'] = True
                 save_data_to_cloud("shopping", shop_list, current_user)
                 st.rerun()
