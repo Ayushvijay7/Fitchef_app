@@ -62,9 +62,17 @@ class MockSheet:
         return MockWorksheet(name)
 
 class MockModel:
-    def generate_content(self, contents, config=None):
+    def generate_content(self, contents, config=None, **kwargs):
         class Res:
-            text = "AI Response (Mock Mode): Great job! Here is a sample recipe/negotiation."
+            text = """AI Response (Mock Mode):
+## Recipe Name
+**Protein:** 30g | **Cals:** 400
+## Ingredients
+* Mock Chicken
+* Mock Veggies
+## Instructions
+1. Cook them.
+"""
         return Res()
 
 class MockClient:
@@ -89,17 +97,53 @@ def safe_float(val):
     except:
         return 0.0
 
-def calculate_streak(logs, goal):
+def get_effective_date(log_dt, start_hour):
+    """
+    Returns the effective 'date' of a log based on the user's start hour.
+    If log time is before start_hour, it counts as the previous day.
+    """
+    if log_dt.hour < start_hour:
+        return (log_dt - timedelta(days=1)).strftime("%Y-%m-%d")
+    return log_dt.strftime("%Y-%m-%d")
+
+def calculate_streak(logs, goal, start_hour=0):
     """Calculates consecutive days where hydration goal was met."""
     if not logs: return 0
+    
+    # Group by Effective Date
     daily_totals = {}
     for l in logs:
-        d = l['date']
-        daily_totals[d] = daily_totals.get(d, 0) + safe_float(l['amount'])
+        # Parse log datetime
+        try:
+            log_dt = datetime.strptime(f"{l['date']} {l['time']}", "%Y-%m-%d %H:%M")
+            eff_date = get_effective_date(log_dt, start_hour)
+            daily_totals[eff_date] = daily_totals.get(eff_date, 0) + safe_float(l['amount'])
+        except:
+            continue
     
     streak = 0
+    # Current Effective Date
+    now = datetime.now()
+    eff_today = get_effective_date(now, start_hour)
+    
     # Check backwards from yesterday (allow today to be in progress)
-    check_date = datetime.now().date() - timedelta(days=1)
+    # If we use effective dates, we just iterate backwards from eff_today - 1
+    
+    # Parse eff_today back to date object to iterate
+    check_date = datetime.strptime(eff_today, "%Y-%m-%d").date() - timedelta(days=1)
+    
+    # If today is already met, include it
+    if daily_totals.get(eff_today, 0) >= goal:
+        streak += 1
+        
+    while True:
+        d_str = check_date.strftime("%Y-%m-%d")
+        if daily_totals.get(d_str, 0) >= goal:
+            streak += 1
+            check_date -= timedelta(days=1)
+        else:
+            break
+    return streak
     
     # If today is already met, include it
     today_str = datetime.now().strftime("%Y-%m-%d")
@@ -142,7 +186,10 @@ def get_db_connection():
 def fetch_user_data(username):
     """Fetches data only for the logged-in user."""
     default_data = {
-        "hydration": {"logs": [], "daily_goal": 3000, "weight": 70, "activity": "Moderate"},
+        "hydration": {
+            "logs": [], "daily_goal": 3000, "weight": 70, 
+            "activity": "Moderate", "start_hour": 0
+        },
         "shopping": [],
         "cheats": {"used_this_week": 0, "weekly_limit": 3}
     }
@@ -327,6 +374,17 @@ if 'app_data' not in st.session_state:
 # --- AUTHENTICATION (MOVED TO MAIN SCREEN) ---
 # This is now visible on mobile without opening the sidebar
 if not st.session_state.get('is_verified'):
+    # Auto-login for Mock Mode (Sandbox)
+    try:
+        if "gcp_service_account" not in st.secrets:
+            st.session_state.api_client = MockClient()
+            st.session_state.is_verified = True
+            st.rerun()
+    except:
+        st.session_state.api_client = MockClient()
+        st.session_state.is_verified = True
+        st.rerun()
+
     st.warning("⚠️ AI Disconnected")
     with st.expander("🔑 Connect Gemini API Key (Required)", expanded=True):
         st.write(f"Logged in as: **{current_user}**")
@@ -372,7 +430,8 @@ if nav == "Dashboard":
     # Gamification: Badges
     hydro = st.session_state.app_data['hydration']
     goal = safe_float(hydro.get('daily_goal', 3000))
-    streak = calculate_streak(hydro.get('logs', []), goal)
+    start_hour = int(hydro.get('start_hour', 0))
+    streak = calculate_streak(hydro.get('logs', []), goal, start_hour)
     
     badges = []
     if streak >= 3: badges.append("💧 Hydration Hero")
@@ -388,10 +447,18 @@ if nav == "Dashboard":
 
     col1, col2, col3 = st.columns(3)
     
-    # Logic
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    today_logs = [l for l in hydro.get('logs',[]) if l['date'] == today_str]
-    total_today = sum([safe_float(l['amount']) for l in today_logs])
+    # Logic: Calculate Today's Total based on Effective Date
+    now = datetime.now()
+    eff_today = get_effective_date(now, start_hour)
+    
+    total_today = 0
+    for l in hydro.get('logs', []):
+        try:
+            l_dt = datetime.strptime(f"{l['date']} {l['time']}", "%Y-%m-%d %H:%M")
+            if get_effective_date(l_dt, start_hour) == eff_today:
+                total_today += safe_float(l['amount'])
+        except: pass
+        
     pct = int((total_today / goal) * 100) if goal > 0 else 0
     
     with col1:
@@ -433,21 +500,36 @@ elif nav == "Fuel (Hydration)":
         rec_goal = (w * 35) + (500 if a != "Sedentary" else 0)
         st.caption(f"Recommended: {int(rec_goal)}ml")
         
-        new_goal = st.number_input("Goal", value=float(h_data.get('daily_goal', 3000)))
+        c1, c2 = st.columns(2)
+        new_goal = c1.number_input("Goal (ml)", value=float(h_data.get('daily_goal', 3000)))
+        start_h = c2.number_input("Day Start Hour (0-23)", min_value=0, max_value=23, value=int(h_data.get('start_hour', 0)))
+        
         if st.button("Save Calibration"):
             h_data['weight'] = w
             h_data['activity'] = a
             h_data['daily_goal'] = new_goal
+            h_data['start_hour'] = start_h
             save_data_to_cloud("hydration", h_data, current_user)
             st.rerun()
 
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    logs = [l for l in h_data.get('logs',[]) if l['date'] == today_str]
+    # Determine "Today" based on Start Hour
+    start_hour = int(h_data.get('start_hour', 0))
+    now = datetime.now()
+    eff_today = get_effective_date(now, start_hour)
     
-    # Segmentation Logic
-    morn = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) < 12])
-    aft = sum([l['amount'] for l in logs if 12 <= int(l['time'].split(':')[0]) < 17])
-    eve = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) >= 17])
+    # Filter logs for THIS cycle
+    current_cycle_logs = []
+    for l in h_data.get('logs', []):
+        try:
+            l_dt = datetime.strptime(f"{l['date']} {l['time']}", "%Y-%m-%d %H:%M")
+            if get_effective_date(l_dt, start_hour) == eff_today:
+                current_cycle_logs.append(l)
+        except: pass
+
+    # Segmentation Logic (still based on clock time for "Morning/Afternoon", but using cycle logs)
+    morn = sum([l['amount'] for l in current_cycle_logs if int(l['time'].split(':')[0]) < 12])
+    aft = sum([l['amount'] for l in current_cycle_logs if 12 <= int(l['time'].split(':')[0]) < 17])
+    eve = sum([l['amount'] for l in current_cycle_logs if int(l['time'].split(':')[0]) >= 17])
     
     c1, c2, c3 = st.columns(3)
     c1.metric("Morning", f"{morn}ml")
@@ -463,7 +545,7 @@ elif nav == "Fuel (Hydration)":
             if 'logs' not in h_data: h_data['logs'] = []
             
             # Check if goal was NOT met before this add
-            current_total = sum([safe_float(l['amount']) for l in h_data['logs'] if l['date'] == today_str])
+            current_total = sum([safe_float(l['amount']) for l in current_cycle_logs])
             goal_val = safe_float(h_data.get('daily_goal', 3000))
             
             h_data['logs'].append({
@@ -611,16 +693,34 @@ elif nav == "Smart Chef":
              try:
                  lines = st.session_state['recipe'].split('\n')
                  count = 0
+                 capture = False
                  for line in lines:
-                     if "*" in line and "Ingredients" not in line:
-                         raw = line.replace("*", "").strip()
-                         st.session_state.app_data['shopping'].append({
-                             "item": raw, "qty": "1 unit", "category": "General", "price_min":0, "price_max":0, "bought": False
-                         })
-                         count += 1
+                     # Start capturing after Ingredients header
+                     if "## Ingredients" in line:
+                         capture = True
+                         continue
+                     # Stop capturing at next header (e.g. Instructions)
+                     if "##" in line and capture:
+                         capture = False
+                         break
+                     
+                     if capture:
+                         clean_line = line.strip()
+                         # Only add lines that look like list items
+                         if clean_line.startswith("*") or clean_line.startswith("-"):
+                             raw = clean_line.lstrip("*- ").strip()
+                             if raw:
+                                 st.session_state.app_data['shopping'].append({
+                                     "item": raw, "qty": "1 unit", "category": "General", "price_min":0, "price_max":0, "bought": False
+                                 })
+                                 count += 1
+                                 
                  save_data_to_cloud("shopping", st.session_state.app_data['shopping'], current_user)
-                 st.success(f"Added {count} ingredients.")
-             except: st.error("Manual add required.")
+                 if count > 0:
+                    st.success(f"Added {count} ingredients.")
+                 else:
+                    st.warning("No ingredients found. Check recipe format.")
+             except Exception as e: st.error(f"Error: {e}")
 
 # =========================================================
 # TAB 5: CHEAT NEGOTIATOR
