@@ -98,11 +98,18 @@ def safe_float(val):
         return 0.0
 
 def clean_json_response(text):
-    """Cleans Markdown code blocks from JSON response."""
+    """Cleans Markdown code blocks and extracts JSON array."""
     try:
-        # Remove ```json and ``` lines
+        # 1. Remove Markdown code blocks
         if "```" in text:
             text = re.sub(r"```json|```", "", text).strip()
+        
+        # 2. Extract outermost brackets [ ... ]
+        # This handles cases where there is text before or after the JSON.
+        match = re.search(r"\[.*\]", text, re.DOTALL)
+        if match:
+            text = match.group(0)
+            
         return text
     except:
         return text
