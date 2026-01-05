@@ -13,6 +13,15 @@ import re
 
 # --- PAGE CONFIG ---
 st.set_page_config(
+    # --- HIDE STREAMLIT BRANDING ---
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
     page_title="FitChef Pro",
     page_icon="🔥",
     layout="wide",
@@ -435,4 +444,5 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data)
             st.rerun()
+
 
