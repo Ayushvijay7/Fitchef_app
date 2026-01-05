@@ -145,20 +145,6 @@ def calculate_streak(logs, goal, start_hour=0):
             break
     return streak
 
-    # If today is already met, include it
-    today_str = datetime.now().strftime("%Y-%m-%d")
-    if daily_totals.get(today_str, 0) >= goal:
-        streak += 1
-
-    while True:
-        d_str = check_date.strftime("%Y-%m-%d")
-        if daily_totals.get(d_str, 0) >= goal:
-            streak += 1
-            check_date -= timedelta(days=1)
-        else:
-            break
-    return streak
-
 # --- DB MANAGER (MULTI-USER) ---
 @st.cache_resource
 def get_db_connection():
@@ -306,11 +292,12 @@ def save_data_to_cloud(key, new_data, username):
         st.warning(f"Cloud Save Error: {e}")
 
 # --- AI WRAPPER ---
-def ask_ai(prompt, image=None, json_mode=False):
+def ask_ai(prompt, image=None, json_mode=False, use_search=False):
     # Mock Mode handling for AI
-    if 'api_client' in st.session_state and isinstance(st.session_state.api_client, MockClient):
+    # Use type name check to avoid class redefinition issues in Streamlit
+    if 'api_client' in st.session_state and type(st.session_state.api_client).__name__ == 'MockClient':
         if json_mode:
-            return json.dumps([{"item": "Mock Chicken", "category": "Protein", "price_min": 100, "price_max": 150}])
+            return json.dumps([{"item": "Mock Chicken", "category": "Protein", "price_min": 220, "price_max": 280}])
         return "AI Response (Mock Mode): Here is your recipe or advice."
 
     if 'api_client' not in st.session_state or not st.session_state.api_client:
@@ -318,23 +305,28 @@ def ask_ai(prompt, image=None, json_mode=False):
         try:
             if "gcp_service_account" not in st.secrets:
                  st.session_state.api_client = MockClient()
-                 return ask_ai(prompt, image, json_mode)
+                 return ask_ai(prompt, image, json_mode, use_search)
         except:
              st.session_state.api_client = MockClient()
-             return ask_ai(prompt, image, json_mode)
+             return ask_ai(prompt, image, json_mode, use_search)
 
         return None if json_mode else "⚠️ AI Offline. Connect API Key."
     try:
         c = [prompt]
         if image: c.append(image)
 
+        tools = []
+        if use_search:
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
+
         config = types.GenerateContentConfig(
             temperature=0.7,
-            response_mime_type="application/json" if json_mode else "text/plain"
+            response_mime_type="application/json" if json_mode else "text/plain",
+            tools=tools
         )
 
         res = st.session_state.api_client.models.generate_content(
-            model="gemini-2.5-pro",
+            model="gemini-2.0-flash",
             contents=c,
             config=config
         )
@@ -633,10 +625,11 @@ elif nav == "Plan (Shopping)":
                 Items: {items_txt}
                 Task:
                 1. Categorize (Protein, Veg, etc).
-                2. Estimate TOTAL price for SPECIFIC QUANTITY (e.g. 500g Chicken = 120 INR, not 1kg price).
+                2. Search online for current prices (Instamart, Blinkit, Zepto) in Hyderabad.
+                3. Estimate TOTAL price for SPECIFIC QUANTITY (e.g. 500g Chicken = 120 INR, not 1kg price).
                 Return JSON list: [{{ "item": "name", "category": "Protein", "price_min": 100, "price_max": 120 }}]
                 """
-                res = ask_ai(prompt, json_mode=True)
+                res = ask_ai(prompt, json_mode=True, use_search=True)
                 try:
                     updates = json.loads(res)
                     count = 0
