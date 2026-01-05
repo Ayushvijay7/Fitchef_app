@@ -1,3 +1,5 @@
 streamlit
 google-genai
 pillow
+gspread
+oauth2client
