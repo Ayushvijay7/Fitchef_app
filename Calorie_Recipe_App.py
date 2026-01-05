@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import random
 import time
-import re # Added for parsing quantities like "1kg"
+import re
 
 # --- PAGE CONFIG ---
 st.set_page_config(
@@ -32,14 +32,15 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     .urgency-high { color: #e74c3c; font-weight: bold; }
+    /* Mobile-friendly adjustments */
+    div[data-testid="column"] { min-width: 0; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- HELPER: SAFE NUMBERS ---
 def safe_parse_qty(qty_str):
-    """Extracts a number from a string like '1.5kg' -> 1.5. Defaults to 1."""
+    """Extracts a number from a string like '1.5 kg' -> 1.5. Defaults to 1."""
     try:
-        # Find the first integer or float in the string
         match = re.search(r"(\d+(\.\d+)?)", str(qty_str))
         if match:
             return float(match.group(1))
@@ -48,7 +49,6 @@ def safe_parse_qty(qty_str):
         return 1.0
 
 def safe_float(val):
-    """Safely converts price strings to floats."""
     try:
         return float(val)
     except:
@@ -63,7 +63,7 @@ def get_db_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         try:
-             # Try opening by name. If you have the key, use client.open_by_key("KEY")
+             # Try opening by name
              sheet = client.open("FitChef DB") 
         except:
              return None
@@ -85,7 +85,6 @@ def fetch_user_data():
         # HYDRATION
         try:
             ws = sh.worksheet("Hydration")
-            # We assume a simple JSON dump in cell A2 for config
             raw_json = ws.cell(2, 1).value
             hydration_data = json.loads(raw_json) if raw_json else default_data["hydration"]
         except:
@@ -95,7 +94,6 @@ def fetch_user_data():
         try:
             ws_s = sh.worksheet("Shopping")
             shopping_list = ws_s.get_all_records()
-            # Normalize booleans
             for x in shopping_list:
                 x['bought'] = str(x['bought']).lower() == 'true'
         except:
@@ -135,6 +133,7 @@ def save_data_to_cloud(key, new_data):
             ws = sh.worksheet("Shopping")
             ws.clear()
             ws.append_row(["item", "qty", "category", "price_min", "price_max", "bought"])
+            # Ensure safe float conversion before saving
             rows = [[x["item"], x["qty"], x.get("category", "General"), 
                      safe_float(x.get("price_min", 0)), safe_float(x.get("price_max", 0)), x["bought"]] for x in new_data]
             if rows: ws.append_rows(rows)
@@ -142,17 +141,24 @@ def save_data_to_cloud(key, new_data):
     except Exception as e:
         st.warning(f"Cloud Save Error: {e}")
 
-# --- AI WRAPPER ---
-def ask_ai(prompt, image=None):
+# --- AI WRAPPER (UPDATED FOR JSON MODE) ---
+def ask_ai(prompt, image=None, json_mode=False):
     if 'api_client' not in st.session_state or not st.session_state.api_client:
-        return "⚠️ AI Offline. Connect API Key."
+        return None if json_mode else "⚠️ AI Offline. Connect API Key."
     try:
         c = [prompt]
         if image: c.append(image)
+        
+        # Configure JSON mode if requested
+        config = types.GenerateContentConfig(
+            temperature=0.7,
+            response_mime_type="application/json" if json_mode else "text/plain"
+        )
+        
         res = st.session_state.api_client.models.generate_content(
             model="gemini-2.5-pro",
             contents=c,
-            config=types.GenerateContentConfig(temperature=0.7)
+            config=config
         )
         return res.text
     except Exception as e:
@@ -188,7 +194,6 @@ if nav == "Dashboard":
     
     col1, col2, col3 = st.columns(3)
     
-    # Hydro
     hydro = st.session_state.app_data['hydration']
     today_str = datetime.now().strftime("%Y-%m-%d")
     today_logs = [l for l in hydro.get('logs',[]) if l['date'] == today_str]
@@ -199,13 +204,11 @@ if nav == "Dashboard":
     with col1:
         st.metric("Hydration", f"{pct}%", f"{int(goal - total_today)}ml to go")
 
-    # Cheats
     cheats = st.session_state.app_data['cheats']
     left = cheats['weekly_limit'] - cheats['used_this_week']
     with col2:
         st.metric("Cheat Budget", f"{left} Left", f"{cheats['used_this_week']} used")
         
-    # Shopping
     shop = st.session_state.app_data['shopping']
     pending = len([x for x in shop if not x['bought']])
     with col3:
@@ -224,7 +227,6 @@ elif nav == "Fuel (Hydration)":
     st.header("💧 Fuel Status")
     h_data = st.session_state.app_data['hydration']
     
-    # Setup
     with st.expander("⚙️ Calibrate Target"):
         w = st.number_input("Weight (kg)", value=float(h_data.get('weight', 70)))
         a = st.selectbox("Activity", ["Sedentary", "Moderate", "High"], index=1)
@@ -242,7 +244,6 @@ elif nav == "Fuel (Hydration)":
     today_str = datetime.now().strftime("%Y-%m-%d")
     logs = [l for l in h_data.get('logs',[]) if l['date'] == today_str]
     
-    # Segmentation
     morn = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) < 12])
     aft = sum([l['amount'] for l in logs if 12 <= int(l['time'].split(':')[0]) < 17])
     eve = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) >= 17])
@@ -252,7 +253,6 @@ elif nav == "Fuel (Hydration)":
     c2.metric("Afternoon", f"{aft}ml")
     c3.metric("Evening", f"{eve}ml")
 
-    # Quick Add
     st.subheader("Quick Log")
     chip_vals = [150, 250, 350, 500]
     cols = st.columns(len(chip_vals) + 1)
@@ -270,35 +270,47 @@ elif nav == "Fuel (Hydration)":
             st.rerun()
 
 # =========================================================
-# 3. PLAN (SHOPPING)
+# 3. PLAN (SHOPPING) - FIXED
 # =========================================================
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
     shop_list = st.session_state.app_data['shopping']
     
-    # --- ERROR FIX IS HERE ---
-    # We use safe_float and safe_parse_qty to prevent crashing on "1kg" or "NaN"
+    # Calculate Total
     est_total = sum([ 
         (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 * safe_parse_qty(x['qty']) 
         for x in shop_list if not x['bought']
     ])
-    # -------------------------
     
     sc1, sc2 = st.columns([2, 1])
     sc1.metric("Est. Cart Value", f"₹{int(est_total)}")
     
-    # Add Item
-    with st.expander("Add Item (Manual)"):
-        ac1, ac2, ac3 = st.columns([3, 1, 1])
-        new_item = ac1.text_input("Item")
-        new_qty = ac2.text_input("Qty", "1")
-        if ac3.button("Add"):
-            shop_list.append({
-                "item": new_item, "qty": new_qty, "category": "General", 
-                "price_min": 0, "price_max": 0, "bought": False
-            })
-            save_data_to_cloud("shopping", shop_list)
-            st.rerun()
+    # --- FIX 1: Split Unit Input ---
+    with st.expander("Add Item (Manual)", expanded=True):
+        c_item, c_qty, c_unit, c_btn = st.columns([3, 1, 1, 1])
+        
+        new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken Breast")
+        # Numeric input for quantity
+        new_qty_num = c_qty.number_input("Qty", min_value=0.1, step=0.5, value=1.0)
+        # Dropdown for UoM
+        uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen", "can", "tbsp", "tsp"]
+        new_unit = c_unit.selectbox("Unit", uom_options)
+        
+        if c_btn.button("Add"):
+            if new_item:
+                # Combine them for storage (e.g., "1.5 kg")
+                final_qty_str = f"{new_qty_num} {new_unit}"
+                
+                shop_list.append({
+                    "item": new_item, 
+                    "qty": final_qty_str, 
+                    "category": "General", 
+                    "price_min": 0, 
+                    "price_max": 0, 
+                    "bought": False
+                })
+                save_data_to_cloud("shopping", shop_list)
+                st.rerun()
 
     # List View
     categories = ["Protein", "Veg", "Dairy", "Grain", "Staple", "Junk", "General"]
@@ -319,30 +331,50 @@ elif nav == "Plan (Shopping)":
             p_avg = (safe_float(item.get('price_min',0)) + safe_float(item.get('price_max',0)))/2
             rc3.caption(f"₹{int(p_avg)}" if p_avg > 0 else "-")
 
+    # --- FIX 2: AI Parse Error Fix (JSON Mode) ---
     if st.button("🤖 Analyze & Price (AI)"):
-        if not st.session_state.get('is_verified'): st.error("Connect AI")
+        if not st.session_state.get('is_verified'): 
+            st.error("Connect AI first")
         else:
-            with st.spinner("Pricing..."):
+            with st.spinner("Analyzing..."):
                 items_txt = ", ".join([x['item'] for x in shop_list if not x['bought']])
+                
+                # We simply ask for the list, but we pass json_mode=True to ask_ai
                 prompt = f"""
-                List: {items_txt}.
-                Task: Categorize (Protein,Veg,Grain,Dairy,Staple,Junk) & Estimate Price INR Hyderabad.
-                Output JSON: [ {{"item": "name", "category": "cat", "price_min": 10, "price_max": 20}} ]
+                You are a grocery price estimator for Hyderabad, India.
+                Items: {items_txt}
+                
+                Return a JSON list of objects with these keys:
+                - item (exact name from input)
+                - category (Protein, Veg, Grain, Dairy, Staple, Junk, General)
+                - price_min (estimated price per unit in INR)
+                - price_max (estimated price per unit in INR)
                 """
-                res = ask_ai(prompt)
+                
+                # Pass json_mode=True to force strict JSON output
+                res = ask_ai(prompt, json_mode=True)
+                
                 try:
-                    clean = res.replace("```json","").replace("```","").strip()
-                    updates = json.loads(clean)
+                    # It returns valid JSON now, so we can load it directly
+                    updates = json.loads(res)
+                    
+                    match_count = 0
                     for u in updates:
                         for x in shop_list:
+                            # Fuzzy matching item names
                             if x['item'].lower() in u['item'].lower():
                                 x['category'] = u['category']
                                 x['price_min'] = u['price_min']
                                 x['price_max'] = u['price_max']
+                                match_count += 1
+                                
                     save_data_to_cloud("shopping", shop_list)
+                    st.success(f"Updated prices for {match_count} items!")
+                    time.sleep(1) # Pause so user sees success msg
                     st.rerun()
-                except:
-                    st.error("AI Parse Error")
+                except Exception as e:
+                    st.error(f"Analysis Failed: {str(e)}")
+                    st.caption("Raw AI Response (Debug): " + str(res))
 
 # =========================================================
 # 4. SMART CHEF
