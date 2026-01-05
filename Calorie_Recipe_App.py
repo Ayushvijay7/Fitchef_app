@@ -13,25 +13,29 @@ import re
 
 # --- PAGE CONFIG ---
 st.set_page_config(
-    # --- HIDE STREAMLIT BRANDING ---
-hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_st_style, unsafe_allow_html=True)
     page_title="FitChef Pro",
     page_icon="🔥",
     layout="wide",
     initial_sidebar_state="collapsed"
 )
 
-# --- STYLING ---
+# --- PHASE 1: HIDE STREAMLIT BRANDING (MOBILE POLISH) ---
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            
+            /* Clean up top padding for mobile */
+            .block-container { padding-top: 1rem; }
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
+# --- CUSTOM CSS ---
 st.markdown("""
     <style>
-    .block-container { padding-top: 2rem; }
+    /* Card Styling */
     .css-card {
         background-color: #ffffff;
         padding: 1.5rem;
@@ -142,7 +146,6 @@ def save_data_to_cloud(key, new_data):
             ws = sh.worksheet("Shopping")
             ws.clear()
             ws.append_row(["item", "qty", "category", "price_min", "price_max", "bought"])
-            # Ensure safe float conversion before saving
             rows = [[x["item"], x["qty"], x.get("category", "General"), 
                      safe_float(x.get("price_min", 0)), safe_float(x.get("price_max", 0)), x["bought"]] for x in new_data]
             if rows: ws.append_rows(rows)
@@ -150,7 +153,7 @@ def save_data_to_cloud(key, new_data):
     except Exception as e:
         st.warning(f"Cloud Save Error: {e}")
 
-# --- AI WRAPPER (UPDATED FOR JSON MODE) ---
+# --- AI WRAPPER (JSON MODE SUPPORT) ---
 def ask_ai(prompt, image=None, json_mode=False):
     if 'api_client' not in st.session_state or not st.session_state.api_client:
         return None if json_mode else "⚠️ AI Offline. Connect API Key."
@@ -158,7 +161,6 @@ def ask_ai(prompt, image=None, json_mode=False):
         c = [prompt]
         if image: c.append(image)
         
-        # Configure JSON mode if requested
         config = types.GenerateContentConfig(
             temperature=0.7,
             response_mime_type="application/json" if json_mode else "text/plain"
@@ -279,13 +281,13 @@ elif nav == "Fuel (Hydration)":
             st.rerun()
 
 # =========================================================
-# 3. PLAN (SHOPPING) - FIXED & ACCURATE
+# 3. PLAN (SHOPPING)
 # =========================================================
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
     shop_list = st.session_state.app_data['shopping']
     
-    # --- MATH FIX: Sum only the line item totals (AI handles the quantity math) ---
+    # --- MATH FIX: Calculate total based on AI line item totals ---
     est_total = sum([ 
         (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 
         for x in shop_list if not x['bought']
@@ -294,7 +296,7 @@ elif nav == "Plan (Shopping)":
     sc1, sc2 = st.columns([2, 1])
     sc1.metric("Est. Cart Value", f"₹{int(est_total)}")
     
-    # Add Item (Manual)
+    # --- FIX: Split Unit Input ---
     with st.expander("Add Item (Manual)", expanded=True):
         c_item, c_qty, c_unit, c_btn = st.columns([3, 1, 1, 1])
         
@@ -332,25 +334,21 @@ elif nav == "Plan (Shopping)":
                 save_data_to_cloud("shopping", shop_list)
                 st.rerun()
             
-            # Display
             rc2.write(f"**{item['item']}** ({item['qty']})")
-            
             p_min = safe_float(item.get('price_min',0))
             p_max = safe_float(item.get('price_max',0))
-            p_avg = (p_min + p_max)/2
             
-            if p_avg > 0:
+            if p_max > 0:
                 rc3.caption(f"₹{int(p_min)} - ₹{int(p_max)}")
             else:
                 rc3.caption("-")
 
-    # --- ACCURACY FIX: Updated Prompt ---
+    # --- FIX: AI Prompt for Total Price of Quantity ---
     if st.button("🤖 Analyze & Price (AI)"):
         if not st.session_state.get('is_verified'): 
             st.error("Connect AI first")
         else:
-            with st.spinner("Checking Hyderabad market rates..."):
-                # We send the Item AND the Quantity to the AI
+            with st.spinner("Analyzing Hyderabad market..."):
                 items_txt = ", ".join([f"{x['item']} ({x['qty']})" for x in shop_list if not x['bought']])
                 
                 prompt = f"""
@@ -375,7 +373,6 @@ elif nav == "Plan (Shopping)":
                     match_count = 0
                     for u in updates:
                         for x in shop_list:
-                            # Fuzzy match item name
                             if x['item'].lower() in u['item'].lower():
                                 x['category'] = u['category']
                                 x['price_min'] = u['price_min']
@@ -388,6 +385,7 @@ elif nav == "Plan (Shopping)":
                     st.rerun()
                 except Exception as e:
                     st.error(f"Analysis Failed: {str(e)}")
+
 # =========================================================
 # 4. SMART CHEF
 # =========================================================
@@ -400,25 +398,45 @@ elif nav == "Smart Chef":
         if use_cam:
             img = st.camera_input("Scan")
             if img and st.button("Detect"):
-                res = ask_ai("List visible ingredients", Image.open(img))
+                res = ask_ai("List visible ingredients. Comma separated.", Image.open(img))
                 st.session_state['detected'] = res
                 st.rerun()
         
         ingredients = st.text_area("Ingredients", value=detected)
     
-    if st.button("Find Meal"):
+    # Constraints
+    cc1, cc2, cc3 = st.columns(3)
+    goal = cc1.selectbox("Goal", ["High Protein", "Fat Loss", "Bulking"])
+    time_limit = cc2.select_slider("Time", options=["15m", "30m", "45m", "1h+"])
+    equip = cc3.multiselect("Equipment", ["Stove", "Oven", "Air Fryer", "Microwave"], default=["Stove"])
+
+    if st.button("Find Best Meal Option", type="primary"):
         if not st.session_state.get('is_verified'): st.error("Connect AI")
         else:
             with st.spinner("Cooking..."):
-                p = f"Ingredients: {ingredients}. Create 1 high protein recipe. Format: # Name \n ## Ingredients \n * item \n ## Instructions"
+                p = f"""
+                Ingredients: {ingredients}. Goal: {goal}. Time: {time_limit}. Equipment: {equip}.
+                Task: Create ONE best recipe. Prioritize Protein.
+                Format: # Name \n **Protein:** XXg | **Cals:** XX \n ## Ingredients \n * item \n ## Instructions
+                """
                 st.session_state['recipe'] = ask_ai(p)
 
     if st.session_state.get('recipe'):
         st.markdown(st.session_state['recipe'])
         if st.button("Add to Shopping List"):
-             st.session_state.app_data['shopping'].append({"item": "Recipe Items", "qty": "1", "category": "General", "bought": False})
-             save_data_to_cloud("shopping", st.session_state.app_data['shopping'])
-             st.success("Added")
+             # Simple extraction of list items
+             try:
+                 lines = st.session_state['recipe'].split('\n')
+                 for line in lines:
+                     if "*" in line and "Ingredients" not in line:
+                         raw = line.replace("*", "").strip()
+                         st.session_state.app_data['shopping'].append({
+                             "item": raw, "qty": "1 unit", "category": "General", "price_min":0, "price_max":0, "bought": False
+                         })
+                 save_data_to_cloud("shopping", st.session_state.app_data['shopping'])
+                 st.success("Added ingredients to plan.")
+             except:
+                 st.error("Manual add required.")
 
 # =========================================================
 # 5. CHEAT NEGOTIATOR
@@ -434,7 +452,8 @@ elif nav == "Cheat Negotiator":
     
     want = st.text_input("I want...")
     if st.button("Judge Me"):
-         res = ask_ai(f"User wants {want}. Strict coach mode. 1. Reality Check 2. Compromise 3. Damage Control. Verdict: APPROVED/DENIED.")
+         p = f"User wants {want}. Strict coach mode. 1. Reality Check 2. Compromise 3. Damage Control. Verdict: APPROVED/DENIED."
+         res = ask_ai(p)
          st.session_state['judge'] = res
          
     if st.session_state.get('judge'):
@@ -444,5 +463,3 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data)
             st.rerun()
-
-
