@@ -19,14 +19,12 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- PHASE 1: HIDE STREAMLIT BRANDING (MOBILE POLISH) ---
+# --- MOBILE POLISH (PHASE 1) ---
 hide_st_style = """
             <style>
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
-            
-            /* Clean up top padding for mobile */
             .block-container { padding-top: 1rem; }
             </style>
             """
@@ -35,7 +33,6 @@ st.markdown(hide_st_style, unsafe_allow_html=True)
 # --- CUSTOM CSS ---
 st.markdown("""
     <style>
-    /* Card Styling */
     .css-card {
         background-color: #ffffff;
         padding: 1.5rem;
@@ -45,7 +42,6 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     .urgency-high { color: #e74c3c; font-weight: bold; }
-    /* Mobile-friendly adjustments */
     div[data-testid="column"] { min-width: 0; }
     </style>
 """, unsafe_allow_html=True)
@@ -67,7 +63,7 @@ def safe_float(val):
     except:
         return 0.0
 
-# --- DB & AUTH MANAGER ---
+# --- DB MANAGER (MULTI-USER) ---
 @st.cache_resource
 def get_db_connection():
     try:
@@ -76,7 +72,6 @@ def get_db_connection():
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         try:
-             # Try opening by name
              sheet = client.open("FitChef DB") 
         except:
              return None
@@ -84,7 +79,8 @@ def get_db_connection():
     except Exception as e:
         return None
 
-def fetch_user_data():
+def fetch_user_data(username):
+    """Fetches data only for the logged-in user."""
     default_data = {
         "hydration": {"logs": [], "daily_goal": 3000, "weight": 70, "activity": "Moderate"},
         "shopping": [],
@@ -98,25 +94,36 @@ def fetch_user_data():
         # HYDRATION
         try:
             ws = sh.worksheet("Hydration")
-            raw_json = ws.cell(2, 1).value
-            hydration_data = json.loads(raw_json) if raw_json else default_data["hydration"]
+            all_recs = ws.get_all_records()
+            user_row = next((r for r in all_recs if str(r.get('username')) == username), None)
+            if user_row and user_row.get('config_json'):
+                hydration_data = json.loads(user_row['config_json'])
+            else:
+                hydration_data = default_data["hydration"]
         except:
              hydration_data = default_data["hydration"]
 
         # SHOPPING
         try:
             ws_s = sh.worksheet("Shopping")
-            shopping_list = ws_s.get_all_records()
-            for x in shopping_list:
+            all_shop = ws_s.get_all_records()
+            # Filter specifically for this user
+            user_shop = [x for x in all_shop if str(x.get('username')) == username]
+            for x in user_shop:
                 x['bought'] = str(x['bought']).lower() == 'true'
+            shopping_list = user_shop
         except:
             shopping_list = []
 
         # CHEATS
         try:
             ws_c = sh.worksheet("Cheats")
-            raw_c = ws_c.cell(2, 1).value
-            cheat_data = json.loads(raw_c) if raw_c else default_data["cheats"]
+            all_c = ws_c.get_all_records()
+            user_c = next((r for r in all_c if str(r.get('username')) == username), None)
+            if user_c and user_c.get('config_json'):
+                cheat_data = json.loads(user_c['config_json'])
+            else:
+                cheat_data = default_data["cheats"]
         except:
              cheat_data = default_data["cheats"]
 
@@ -125,35 +132,73 @@ def fetch_user_data():
     except Exception as e:
         return default_data
 
-def save_data_to_cloud(key, new_data):
+def save_data_to_cloud(key, new_data, username):
+    """Saves data while preserving other users' rows."""
     sh = get_db_connection()
     if not sh: return
 
     try:
         if key == "hydration":
             ws = sh.worksheet("Hydration")
+            all_rows = ws.get_all_records()
+            others = [r for r in all_rows if str(r.get('username')) != username]
+            
+            my_row = {"username": username, "config_json": json.dumps(new_data)}
+            
+            # Rewrite logic
+            final_data = [[r['username'], r['config_json']] for r in others]
+            final_data.append([my_row['username'], my_row['config_json']])
+            
             ws.clear()
-            ws.append_row(["config_json"]) 
-            ws.append_row([json.dumps(new_data)])
+            ws.append_row(["username", "config_json"])
+            ws.append_rows(final_data)
             
         elif key == "cheats":
             ws = sh.worksheet("Cheats")
+            all_rows = ws.get_all_records()
+            others = [r for r in all_rows if str(r.get('username')) != username]
+            
+            my_row = {"username": username, "config_json": json.dumps(new_data)}
+            
+            final_data = [[r['username'], r['config_json']] for r in others]
+            final_data.append([my_row['username'], my_row['config_json']])
+            
             ws.clear()
-            ws.append_row(["config_json"])
-            ws.append_row([json.dumps(new_data)])
+            ws.append_row(["username", "config_json"])
+            ws.append_rows(final_data)
             
         elif key == "shopping":
             ws = sh.worksheet("Shopping")
+            all_rows = ws.get_all_records()
+            others = [r for r in all_rows if str(r.get('username')) != username]
+            
+            # Convert my new data into rows
+            my_rows = []
+            for x in new_data:
+                my_rows.append({
+                    "username": username,
+                    "item": x["item"], "qty": x["qty"], 
+                    "category": x.get("category", "General"),
+                    "price_min": safe_float(x.get("price_min", 0)), 
+                    "price_max": safe_float(x.get("price_max", 0)), 
+                    "bought": x["bought"]
+                })
+            
+            # Combine
+            export_rows = []
+            for r in others:
+                export_rows.append([r['username'], r['item'], r['qty'], r['category'], r['price_min'], r['price_max'], r['bought']])
+            for r in my_rows:
+                export_rows.append([r['username'], r['item'], r['qty'], r['category'], r['price_min'], r['price_max'], r['bought']])
+                
             ws.clear()
-            ws.append_row(["item", "qty", "category", "price_min", "price_max", "bought"])
-            rows = [[x["item"], x["qty"], x.get("category", "General"), 
-                     safe_float(x.get("price_min", 0)), safe_float(x.get("price_max", 0)), x["bought"]] for x in new_data]
-            if rows: ws.append_rows(rows)
+            ws.append_row(["username", "item", "qty", "category", "price_min", "price_max", "bought"])
+            if export_rows: ws.append_rows(export_rows)
             
     except Exception as e:
         st.warning(f"Cloud Save Error: {e}")
 
-# --- AI WRAPPER (JSON MODE SUPPORT) ---
+# --- AI WRAPPER ---
 def ask_ai(prompt, image=None, json_mode=False):
     if 'api_client' not in st.session_state or not st.session_state.api_client:
         return None if json_mode else "⚠️ AI Offline. Connect API Key."
@@ -175,60 +220,74 @@ def ask_ai(prompt, image=None, json_mode=False):
     except Exception as e:
         return f"AI Error: {e}"
 
-# --- APP INIT ---
+# =========================================================
+# LOGIN SCREEN
+# =========================================================
+if 'current_user' not in st.session_state:
+    st.session_state.current_user = None
+
+if not st.session_state.current_user:
+    st.title("🔥 FitChef Pro")
+    st.markdown("### Identify Yourself")
+    
+    with st.container(border=True):
+        username_input = st.text_input("Username", placeholder="e.g. Rahul")
+        if st.button("Start Cooking", type="primary"):
+            if username_input:
+                st.session_state.current_user = username_input.strip()
+                st.rerun()
+            else:
+                st.error("Enter a name.")
+    st.stop()
+
+# =========================================================
+# MAIN APP (LOGGED IN)
+# =========================================================
+current_user = st.session_state.current_user
+
+# 1. Load Data
 if 'app_data' not in st.session_state:
-    st.session_state.app_data = fetch_user_data()
+    st.session_state.app_data = fetch_user_data(current_user)
 
-# --- AUTH & SETUP (Hidden in Expander for cleanliness) ---
-if not st.session_state.get('is_verified'):
-    with st.expander("🔐 Connect AI Key (Click to Open)", expanded=True):
-        k = st.text_input("Gemini API Key", type="password")
-        if k:
-            try:
-                cl = genai.Client(api_key=k)
-                cl.models.get(model="gemini-2.5-pro")
-                st.session_state.api_client = cl
-                st.session_state.is_verified = True
-                st.success("Connected")
-            except:
-                st.error("Invalid Key")
+# 2. Auth Check (Sidebar)
+with st.sidebar:
+    st.title(f"👤 {current_user}")
+    if not st.session_state.get('is_verified'):
+        with st.expander("Connect AI", expanded=True):
+            k = st.text_input("API Key", type="password")
+            if k:
+                try:
+                    cl = genai.Client(api_key=k)
+                    cl.models.get(model="gemini-2.5-pro")
+                    st.session_state.api_client = cl
+                    st.session_state.is_verified = True
+                    st.success("Online")
+                except: st.error("Error")
+    
+    if st.button("Logout"):
+        st.session_state.current_user = None
+        st.session_state.app_data = None
+        st.rerun()
 
-# --- MOBILE-FRIENDLY NAVIGATION (Horizontal) ---
-# We use columns to create a "Tab bar" feel at the top
+# 3. Top Navigation
 nav_options = ["🏠 Home", "💧 Fuel", "🛒 Plan", "👨‍🍳 Chef", "😈 Cheat"]
-# Store selection in session state so it persists
-if 'nav_selection' not in st.session_state:
-    st.session_state.nav_selection = "🏠 Home"
-
-# Create clickable columns
+if 'nav_selection' not in st.session_state: st.session_state.nav_selection = "🏠 Home"
 cols = st.columns(5)
 for i, option in enumerate(nav_options):
-    if cols[i].button(option):
-        st.session_state.nav_selection = option
-
-# Map the selection to your code's logic
+    if cols[i].button(option): st.session_state.nav_selection = option
 selected_nav = st.session_state.nav_selection
-
-# Mapping dictionary to match your if/elif blocks
-nav_map = {
-    "🏠 Home": "Dashboard",
-    "💧 Fuel": "Fuel (Hydration)",
-    "🛒 Plan": "Plan (Shopping)",
-    "👨‍🍳 Chef": "Smart Chef",
-    "😈 Cheat": "Cheat Negotiator"
-}
+nav_map = {"🏠 Home": "Dashboard", "💧 Fuel": "Fuel (Hydration)", "🛒 Plan": "Plan (Shopping)", "👨‍🍳 Chef": "Smart Chef", "😈 Cheat": "Cheat Negotiator"}
 nav = nav_map[selected_nav]
 
-# --- (Rest of your app logic starts here: if nav == "Dashboard": ...) ---
-
 # =========================================================
-# 1. DASHBOARD
+# TAB 1: DASHBOARD
 # =========================================================
 if nav == "Dashboard":
-    st.title("Good Afternoon, Chef.")
+    st.title(f"Hello, {current_user}.")
     
     col1, col2, col3 = st.columns(3)
     
+    # Logic
     hydro = st.session_state.app_data['hydration']
     today_str = datetime.now().strftime("%Y-%m-%d")
     today_logs = [l for l in hydro.get('logs',[]) if l['date'] == today_str]
@@ -237,7 +296,7 @@ if nav == "Dashboard":
     pct = int((total_today / goal) * 100) if goal > 0 else 0
     
     with col1:
-        st.metric("Hydration", f"{pct}%", f"{int(goal - total_today)}ml to go")
+        st.metric("Hydration", f"{pct}%", f"{int(goal - total_today)}ml left")
 
     cheats = st.session_state.app_data['cheats']
     left = cheats['weekly_limit'] - cheats['used_this_week']
@@ -247,16 +306,18 @@ if nav == "Dashboard":
     shop = st.session_state.app_data['shopping']
     pending = len([x for x in shop if not x['bought']])
     with col3:
-        st.metric("Shopping List", f"{pending} Items", "Pending")
+        st.metric("Shopping", f"{pending} Items", "Pending")
     
     st.divider()
     if pct < 50 and datetime.now().hour > 15:
-        st.warning("📉 **Insight:** Behind on water. Catch up now.")
+        st.warning("📉 **Insight:** You are behind on hydration. Drink 500ml now.")
+    elif left == 0:
+        st.error("⛔ **Insight:** No cheats left. Stay strict.")
     else:
         st.info("🚀 **Insight:** Solid pace today.")
 
 # =========================================================
-# 2. FUEL (HYDRATION)
+# TAB 2: FUEL (With Segments & Urgency)
 # =========================================================
 elif nav == "Fuel (Hydration)":
     st.header("💧 Fuel Status")
@@ -269,16 +330,17 @@ elif nav == "Fuel (Hydration)":
         st.caption(f"Recommended: {int(rec_goal)}ml")
         
         new_goal = st.number_input("Goal", value=float(h_data.get('daily_goal', 3000)))
-        if st.button("Save"):
+        if st.button("Save Calibration"):
             h_data['weight'] = w
             h_data['activity'] = a
             h_data['daily_goal'] = new_goal
-            save_data_to_cloud("hydration", h_data)
+            save_data_to_cloud("hydration", h_data, current_user)
             st.rerun()
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     logs = [l for l in h_data.get('logs',[]) if l['date'] == today_str]
     
+    # Segmentation Logic
     morn = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) < 12])
     aft = sum([l['amount'] for l in logs if 12 <= int(l['time'].split(':')[0]) < 17])
     eve = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) >= 17])
@@ -300,18 +362,18 @@ elif nav == "Fuel (Hydration)":
                 "time": datetime.now().strftime("%H:%M"),
                 "amount": val
             })
-            save_data_to_cloud("hydration", h_data)
+            save_data_to_cloud("hydration", h_data, current_user)
             st.toast(f"Logged {val}ml")
             st.rerun()
 
 # =========================================================
-# 3. PLAN (SHOPPING)
+# TAB 3: PLAN (With Categories & AI Pricing)
 # =========================================================
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
     shop_list = st.session_state.app_data['shopping']
     
-    # --- MATH FIX: Calculate total based on AI line item totals ---
+    # Total Calculation
     est_total = sum([ 
         (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 
         for x in shop_list if not x['bought']
@@ -320,13 +382,12 @@ elif nav == "Plan (Shopping)":
     sc1, sc2 = st.columns([2, 1])
     sc1.metric("Est. Cart Value", f"₹{int(est_total)}")
     
-    # --- FIX: Split Unit Input ---
     with st.expander("Add Item (Manual)", expanded=True):
         c_item, c_qty, c_unit, c_btn = st.columns([3, 1, 1, 1])
         
-        new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken Breast")
+        new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken")
         new_qty_num = c_qty.number_input("Qty", min_value=0.1, step=0.5, value=1.0)
-        uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen", "can", "tbsp", "tsp"]
+        uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen"]
         new_unit = c_unit.selectbox("Unit", uom_options)
         
         if c_btn.button("Add"):
@@ -336,14 +397,13 @@ elif nav == "Plan (Shopping)":
                     "item": new_item, 
                     "qty": final_qty_str, 
                     "category": "General", 
-                    "price_min": 0, 
-                    "price_max": 0, 
+                    "price_min": 0, "price_max": 0, 
                     "bought": False
                 })
-                save_data_to_cloud("shopping", shop_list)
+                save_data_to_cloud("shopping", shop_list, current_user)
                 st.rerun()
 
-    # List View
+    # Categorized View
     categories = ["Protein", "Veg", "Dairy", "Grain", "Staple", "Junk", "General"]
     for cat in categories:
         items = [x for x in shop_list if x.get('category', 'General') == cat]
@@ -355,63 +415,44 @@ elif nav == "Plan (Shopping)":
             
             if rc1.checkbox("", key=f"chk_{item['item']}"):
                 item['bought'] = True
-                save_data_to_cloud("shopping", shop_list)
+                save_data_to_cloud("shopping", shop_list, current_user)
                 st.rerun()
             
             rc2.write(f"**{item['item']}** ({item['qty']})")
             p_min = safe_float(item.get('price_min',0))
             p_max = safe_float(item.get('price_max',0))
-            
-            if p_max > 0:
-                rc3.caption(f"₹{int(p_min)} - ₹{int(p_max)}")
-            else:
-                rc3.caption("-")
+            if p_max > 0: rc3.caption(f"₹{int(p_min)} - ₹{int(p_max)}")
+            else: rc3.caption("-")
 
-    # --- FIX: AI Prompt for Total Price of Quantity ---
     if st.button("🤖 Analyze & Price (AI)"):
-        if not st.session_state.get('is_verified'): 
-            st.error("Connect AI first")
+        if not st.session_state.get('is_verified'): st.error("Connect AI")
         else:
-            with st.spinner("Analyzing Hyderabad market..."):
+            with st.spinner("Analyzing..."):
                 items_txt = ", ".join([f"{x['item']} ({x['qty']})" for x in shop_list if not x['bought']])
-                
                 prompt = f"""
-                You are a grocery price estimator for Hyderabad, India.
-                Items to price: {items_txt}
-                
-                Task:
-                1. Categorize items (Protein, Veg, Grain, Dairy, Staple, Junk, General).
-                2. Estimate the TOTAL price for the SPECIFIC QUANTITY listed (e.g. if '500g Chicken', give price for 500g, NOT 1kg).
-                3. Use realistic local market rates (e.g. Chicken ~240/kg, Milk ~60/L).
-                
-                Return JSON list:
-                [
-                  {{ "item": "exact name from input", "category": "Protein", "price_min": 100, "price_max": 120 }}
-                ]
+                You are a grocery price estimator for Hyderabad.
+                Items: {items_txt}
+                Task: 1. Categorize (Protein, Veg, etc). 2. Estimate TOTAL price for QUANTITY.
+                Return JSON list: [{{ "item": "name", "category": "Protein", "price_min": 100, "price_max": 120 }}]
                 """
-                
                 res = ask_ai(prompt, json_mode=True)
-                
                 try:
                     updates = json.loads(res)
-                    match_count = 0
+                    count = 0
                     for u in updates:
                         for x in shop_list:
                             if x['item'].lower() in u['item'].lower():
                                 x['category'] = u['category']
                                 x['price_min'] = u['price_min']
                                 x['price_max'] = u['price_max']
-                                match_count += 1
-                                
-                    save_data_to_cloud("shopping", shop_list)
-                    st.success(f"Updated prices for {match_count} items!")
-                    time.sleep(1)
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Analysis Failed: {str(e)}")
+                                count+=1
+                    save_data_to_cloud("shopping", shop_list, current_user)
+                    st.success(f"Updated {count} items.")
+                    time.sleep(1); st.rerun()
+                except Exception as e: st.error(f"Error: {e}")
 
 # =========================================================
-# 4. SMART CHEF
+# TAB 4: SMART CHEF (With Constraints & Camera)
 # =========================================================
 elif nav == "Smart Chef":
     st.header("👨‍🍳 Smart Chef")
@@ -448,7 +489,6 @@ elif nav == "Smart Chef":
     if st.session_state.get('recipe'):
         st.markdown(st.session_state['recipe'])
         if st.button("Add to Shopping List"):
-             # Simple extraction of list items
              try:
                  lines = st.session_state['recipe'].split('\n')
                  for line in lines:
@@ -457,13 +497,12 @@ elif nav == "Smart Chef":
                          st.session_state.app_data['shopping'].append({
                              "item": raw, "qty": "1 unit", "category": "General", "price_min":0, "price_max":0, "bought": False
                          })
-                 save_data_to_cloud("shopping", st.session_state.app_data['shopping'])
-                 st.success("Added ingredients to plan.")
-             except:
-                 st.error("Manual add required.")
+                 save_data_to_cloud("shopping", st.session_state.app_data['shopping'], current_user)
+                 st.success("Added ingredients.")
+             except: st.error("Manual add required.")
 
 # =========================================================
-# 5. CHEAT NEGOTIATOR
+# TAB 5: CHEAT NEGOTIATOR (Strict Mode)
 # =========================================================
 elif nav == "Cheat Negotiator":
     st.header("😈 Negotiator")
@@ -472,11 +511,20 @@ elif nav == "Cheat Negotiator":
     limit = c_data['weekly_limit']
     
     st.progress(used/limit if limit > 0 else 0)
-    st.write(f"Used: {used}/{limit}")
+    st.caption(f"Used: {used}/{limit}")
     
+    if used >= limit: st.error("⛔ BUDGET EXCEEDED.")
+        
     want = st.text_input("I want...")
     if st.button("Judge Me"):
-         p = f"User wants {want}. Strict coach mode. 1. Reality Check 2. Compromise 3. Damage Control. Verdict: APPROVED/DENIED."
+         p = f"""
+         User wants: {want}. Budget used: {used}/{limit}.
+         Act as Strict Coach. Output 3 sections Markdown:
+         ## 🟥 Reality Check (Calories/Fat)
+         ## 🟨 Negotiation (Compromise?)
+         ## 🟩 Damage Control (If eaten)
+         Verdict: APPROVED or DENIED.
+         """
          res = ask_ai(p)
          st.session_state['judge'] = res
          
@@ -485,6 +533,5 @@ elif nav == "Cheat Negotiator":
         c1, c2 = st.columns(2)
         if c1.button("I ate it"):
             c_data['used_this_week'] += 1
-            save_data_to_cloud("cheats", c_data)
+            save_data_to_cloud("cheats", c_data, current_user)
             st.rerun()
-
