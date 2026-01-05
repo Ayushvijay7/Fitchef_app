@@ -97,6 +97,16 @@ def safe_float(val):
     except:
         return 0.0
 
+def clean_json_response(text):
+    """Cleans Markdown code blocks from JSON response."""
+    try:
+        # Remove ```json and ``` lines
+        if "```" in text:
+            text = re.sub(r"```json|```", "", text).strip()
+        return text
+    except:
+        return text
+
 def get_effective_date(log_dt, start_hour):
     """
     Returns the effective 'date' of a log based on the user's start hour.
@@ -631,7 +641,8 @@ elif nav == "Plan (Shopping)":
                 """
                 res = ask_ai(prompt, json_mode=True, use_search=True)
                 try:
-                    updates = json.loads(res)
+                    cleaned_res = clean_json_response(res)
+                    updates = json.loads(cleaned_res)
                     count = 0
                     for u in updates:
                         for x in shop_list:
