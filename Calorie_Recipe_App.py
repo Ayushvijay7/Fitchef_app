@@ -19,18 +19,18 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# --- MOBILE POLISH (PHASE 1) ---
+# --- MOBILE POLISH & CSS ---
+# Hides Streamlit branding and optimizes padding for mobile
 hide_st_style = """
             <style>
             #MainMenu {visibility: hidden;}
             footer {visibility: hidden;}
             header {visibility: hidden;}
-            .block-container { padding-top: 1rem; }
+            .block-container { padding-top: 1rem; padding-bottom: 5rem; }
             </style>
             """
 st.markdown(hide_st_style, unsafe_allow_html=True)
 
-# --- CUSTOM CSS ---
 st.markdown("""
     <style>
     .css-card {
@@ -42,11 +42,12 @@ st.markdown("""
         margin-bottom: 1rem;
     }
     .urgency-high { color: #e74c3c; font-weight: bold; }
+    /* Ensure columns don't shrink too much on mobile */
     div[data-testid="column"] { min-width: 0; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- HELPER: SAFE NUMBERS ---
+# --- HELPERS: SAFE MATH ---
 def safe_parse_qty(qty_str):
     """Extracts a number from a string like '1.5 kg' -> 1.5. Defaults to 1."""
     try:
@@ -145,7 +146,7 @@ def save_data_to_cloud(key, new_data, username):
             
             my_row = {"username": username, "config_json": json.dumps(new_data)}
             
-            # Rewrite logic
+            # Rebuild Table: Others + Mine
             final_data = [[r['username'], r['config_json']] for r in others]
             final_data.append([my_row['username'], my_row['config_json']])
             
@@ -221,7 +222,7 @@ def ask_ai(prompt, image=None, json_mode=False):
         return f"AI Error: {e}"
 
 # =========================================================
-# LOGIN SCREEN
+# 1. LOGIN SCREEN
 # =========================================================
 if 'current_user' not in st.session_state:
     st.session_state.current_user = None
@@ -241,16 +242,16 @@ if not st.session_state.current_user:
     st.stop()
 
 # =========================================================
-# MAIN APP (LOGGED IN)
+# 2. MAIN APP SETUP (Logged In)
 # =========================================================
 current_user = st.session_state.current_user
 
-# 1. Load Data
+# Load Data
 if 'app_data' not in st.session_state:
     st.session_state.app_data = fetch_user_data(current_user)
 
-# 2. AUTH CHECK (MOVED TO MAIN SCREEN)
-# We moved this OUT of st.sidebar so it is visible on mobile immediately
+# --- AUTHENTICATION (MOVED TO MAIN SCREEN) ---
+# This is now visible on mobile without opening the sidebar
 if not st.session_state.get('is_verified'):
     st.warning("⚠️ AI Disconnected")
     with st.expander("🔑 Connect Gemini API Key (Required)", expanded=True):
@@ -268,15 +269,13 @@ if not st.session_state.get('is_verified'):
             except Exception as e:
                 st.error(f"Connection failed: {e}")
 
-# 3. TOP NAVIGATION (Horizontal)
-# Only show navigation if verified (or let them navigate but features will be locked)
+# --- NAVIGATION (HORIZONTAL TOP BAR) ---
+# Replaces Sidebar Navigation
 nav_options = ["🏠 Home", "💧 Fuel", "🛒 Plan", "👨‍🍳 Chef", "😈 Cheat"]
 if 'nav_selection' not in st.session_state: st.session_state.nav_selection = "🏠 Home"
 
-# Make columns responsive
 cols = st.columns(5)
 for i, option in enumerate(nav_options):
-    # Shorten names for mobile if needed, or rely on icons
     if cols[i].button(option): 
         st.session_state.nav_selection = option
 
@@ -288,13 +287,13 @@ nav_map = {
     "👨‍🍳 Chef": "Smart Chef", 
     "😈 Cheat": "Cheat Negotiator"
 }
-nav = nav_map[selected_nav
+nav = nav_map[selected_nav]
 
 # =========================================================
 # TAB 1: DASHBOARD
 # =========================================================
 if nav == "Dashboard":
-    st.title(f"Hello, {current_user}.")
+    st.header(f"Hello, {current_user}.")
     
     col1, col2, col3 = st.columns(3)
     
@@ -326,9 +325,15 @@ if nav == "Dashboard":
         st.error("⛔ **Insight:** No cheats left. Stay strict.")
     else:
         st.info("🚀 **Insight:** Solid pace today.")
+        
+    # LOGOUT BUTTON (Moved here from Sidebar)
+    if st.button("Log Out"):
+        st.session_state.current_user = None
+        st.session_state.app_data = None
+        st.rerun()
 
 # =========================================================
-# TAB 2: FUEL (With Segments & Urgency)
+# TAB 2: FUEL (HYDRATION)
 # =========================================================
 elif nav == "Fuel (Hydration)":
     st.header("💧 Fuel Status")
@@ -378,7 +383,7 @@ elif nav == "Fuel (Hydration)":
             st.rerun()
 
 # =========================================================
-# TAB 3: PLAN (With Categories & AI Pricing)
+# TAB 3: PLAN (SHOPPING)
 # =========================================================
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
@@ -398,7 +403,7 @@ elif nav == "Plan (Shopping)":
         
         new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken")
         new_qty_num = c_qty.number_input("Qty", min_value=0.1, step=0.5, value=1.0)
-        uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen"]
+        uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen", "can"]
         new_unit = c_unit.selectbox("Unit", uom_options)
         
         if c_btn.button("Add"):
@@ -438,12 +443,14 @@ elif nav == "Plan (Shopping)":
     if st.button("🤖 Analyze & Price (AI)"):
         if not st.session_state.get('is_verified'): st.error("Connect AI")
         else:
-            with st.spinner("Analyzing..."):
+            with st.spinner("Analyzing Hyderabad Market..."):
                 items_txt = ", ".join([f"{x['item']} ({x['qty']})" for x in shop_list if not x['bought']])
                 prompt = f"""
                 You are a grocery price estimator for Hyderabad.
                 Items: {items_txt}
-                Task: 1. Categorize (Protein, Veg, etc). 2. Estimate TOTAL price for QUANTITY.
+                Task: 
+                1. Categorize (Protein, Veg, etc). 
+                2. Estimate TOTAL price for SPECIFIC QUANTITY (e.g. 500g Chicken = 120 INR, not 1kg price).
                 Return JSON list: [{{ "item": "name", "category": "Protein", "price_min": 100, "price_max": 120 }}]
                 """
                 res = ask_ai(prompt, json_mode=True)
@@ -463,7 +470,7 @@ elif nav == "Plan (Shopping)":
                 except Exception as e: st.error(f"Error: {e}")
 
 # =========================================================
-# TAB 4: SMART CHEF (With Constraints & Camera)
+# TAB 4: SMART CHEF
 # =========================================================
 elif nav == "Smart Chef":
     st.header("👨‍🍳 Smart Chef")
@@ -502,18 +509,20 @@ elif nav == "Smart Chef":
         if st.button("Add to Shopping List"):
              try:
                  lines = st.session_state['recipe'].split('\n')
+                 count = 0
                  for line in lines:
                      if "*" in line and "Ingredients" not in line:
                          raw = line.replace("*", "").strip()
                          st.session_state.app_data['shopping'].append({
                              "item": raw, "qty": "1 unit", "category": "General", "price_min":0, "price_max":0, "bought": False
                          })
+                         count += 1
                  save_data_to_cloud("shopping", st.session_state.app_data['shopping'], current_user)
-                 st.success("Added ingredients.")
+                 st.success(f"Added {count} ingredients.")
              except: st.error("Manual add required.")
 
 # =========================================================
-# TAB 5: CHEAT NEGOTIATOR (Strict Mode)
+# TAB 5: CHEAT NEGOTIATOR
 # =========================================================
 elif nav == "Cheat Negotiator":
     st.header("😈 Negotiator")
@@ -546,4 +555,3 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data, current_user)
             st.rerun()
-
