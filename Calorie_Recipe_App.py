@@ -21,7 +21,7 @@ def get_gsheet_connection():
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     # Connect to the Sheet
-    sheet = client.open("FitChef DB") # MAKE SURE THIS MATCHES YOUR SHEET NAME
+    sheet = client.open_by_key("1c_rd_dwvTAMpmnt3Wphqt5ejmo-YvkKpY7UiIsr95XY") # MAKE SURE THIS MATCHES YOUR SHEET NAME
     return sheet
 
 # --- DATA MANAGER ---
@@ -226,3 +226,4 @@ elif menu == "😈 Cheat Negotiator":
         with st.spinner("Analyzing..."):
             res = ask_gemini(f"User wants {craving}. Goal: Fitness. Estimate calories, calculate exercise to burn off, and suggest healthy swap.")
             st.info(res)
+
