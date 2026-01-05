@@ -249,35 +249,46 @@ current_user = st.session_state.current_user
 if 'app_data' not in st.session_state:
     st.session_state.app_data = fetch_user_data(current_user)
 
-# 2. Auth Check (Sidebar)
-with st.sidebar:
-    st.title(f"👤 {current_user}")
-    if not st.session_state.get('is_verified'):
-        with st.expander("Connect AI", expanded=True):
-            k = st.text_input("API Key", type="password")
-            if k:
-                try:
-                    cl = genai.Client(api_key=k)
-                    cl.models.get(model="gemini-2.5-pro")
-                    st.session_state.api_client = cl
-                    st.session_state.is_verified = True
-                    st.success("Online")
-                except: st.error("Error")
-    
-    if st.button("Logout"):
-        st.session_state.current_user = None
-        st.session_state.app_data = None
-        st.rerun()
+# 2. AUTH CHECK (MOVED TO MAIN SCREEN)
+# We moved this OUT of st.sidebar so it is visible on mobile immediately
+if not st.session_state.get('is_verified'):
+    st.warning("⚠️ AI Disconnected")
+    with st.expander("🔑 Connect Gemini API Key (Required)", expanded=True):
+        st.write(f"Logged in as: **{current_user}**")
+        k = st.text_input("Paste API Key", type="password", key="api_input")
+        if k:
+            try:
+                cl = genai.Client(api_key=k)
+                cl.models.get(model="gemini-2.5-pro")
+                st.session_state.api_client = cl
+                st.session_state.is_verified = True
+                st.success("Connected! Loading...")
+                time.sleep(1)
+                st.rerun()
+            except Exception as e:
+                st.error(f"Connection failed: {e}")
 
-# 3. Top Navigation
+# 3. TOP NAVIGATION (Horizontal)
+# Only show navigation if verified (or let them navigate but features will be locked)
 nav_options = ["🏠 Home", "💧 Fuel", "🛒 Plan", "👨‍🍳 Chef", "😈 Cheat"]
 if 'nav_selection' not in st.session_state: st.session_state.nav_selection = "🏠 Home"
+
+# Make columns responsive
 cols = st.columns(5)
 for i, option in enumerate(nav_options):
-    if cols[i].button(option): st.session_state.nav_selection = option
+    # Shorten names for mobile if needed, or rely on icons
+    if cols[i].button(option): 
+        st.session_state.nav_selection = option
+
 selected_nav = st.session_state.nav_selection
-nav_map = {"🏠 Home": "Dashboard", "💧 Fuel": "Fuel (Hydration)", "🛒 Plan": "Plan (Shopping)", "👨‍🍳 Chef": "Smart Chef", "😈 Cheat": "Cheat Negotiator"}
-nav = nav_map[selected_nav]
+nav_map = {
+    "🏠 Home": "Dashboard", 
+    "💧 Fuel": "Fuel (Hydration)", 
+    "🛒 Plan": "Plan (Shopping)", 
+    "👨‍🍳 Chef": "Smart Chef", 
+    "😈 Cheat": "Cheat Negotiator"
+}
+nav = nav_map[selected_nav
 
 # =========================================================
 # TAB 1: DASHBOARD
@@ -535,3 +546,4 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data, current_user)
             st.rerun()
+
