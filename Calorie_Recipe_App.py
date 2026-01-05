@@ -47,6 +47,31 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
+# --- MOCKING FOR TESTING (SANDBOX MODE) ---
+class MockWorksheet:
+    def __init__(self, name):
+        self.name = name
+    def get_all_records(self):
+        return []
+    def clear(self): pass
+    def append_row(self, row): pass
+    def append_rows(self, rows): pass
+
+class MockSheet:
+    def worksheet(self, name):
+        return MockWorksheet(name)
+
+class MockModel:
+    def generate_content(self, contents, config=None):
+        class Res:
+            text = "AI Response (Mock Mode): Great job! Here is a sample recipe/negotiation."
+        return Res()
+
+class MockClient:
+    @property
+    def models(self):
+        return MockModel()
+
 # --- HELPERS: SAFE MATH ---
 def safe_parse_qty(qty_str):
     """Extracts a number from a string like '1.5 kg' -> 1.5. Defaults to 1."""
@@ -64,21 +89,55 @@ def safe_float(val):
     except:
         return 0.0
 
+def calculate_streak(logs, goal):
+    """Calculates consecutive days where hydration goal was met."""
+    if not logs: return 0
+    daily_totals = {}
+    for l in logs:
+        d = l['date']
+        daily_totals[d] = daily_totals.get(d, 0) + safe_float(l['amount'])
+
+    streak = 0
+    # Check backwards from yesterday (allow today to be in progress)
+    check_date = datetime.now().date() - timedelta(days=1)
+
+    # If today is already met, include it
+    today_str = datetime.now().strftime("%Y-%m-%d")
+    if daily_totals.get(today_str, 0) >= goal:
+        streak += 1
+
+    while True:
+        d_str = check_date.strftime("%Y-%m-%d")
+        if daily_totals.get(d_str, 0) >= goal:
+            streak += 1
+            check_date -= timedelta(days=1)
+        else:
+            break
+    return streak
+
 # --- DB MANAGER (MULTI-USER) ---
 @st.cache_resource
 def get_db_connection():
     try:
+        # CHECK IF MOCK MODE IS NEEDED
+        try:
+            if "gcp_service_account" not in st.secrets:
+                return MockSheet()
+        except:
+            return MockSheet()
+
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds_dict = dict(st.secrets["gcp_service_account"])
         creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
         client = gspread.authorize(creds)
         try:
-             sheet = client.open("FitChef DB") 
+             sheet = client.open("FitChef DB")
         except:
              return None
         return sheet
     except Exception as e:
-        return None
+        # Fallback to mock if connection fails
+        return MockSheet()
 
 def fetch_user_data(username):
     """Fetches data only for the logged-in user."""
@@ -87,10 +146,10 @@ def fetch_user_data(username):
         "shopping": [],
         "cheats": {"used_this_week": 0, "weekly_limit": 3}
     }
-    
+
     sh = get_db_connection()
-    if not sh: return default_data 
-    
+    if not sh: return default_data
+
     try:
         # HYDRATION
         try:
@@ -143,75 +202,90 @@ def save_data_to_cloud(key, new_data, username):
             ws = sh.worksheet("Hydration")
             all_rows = ws.get_all_records()
             others = [r for r in all_rows if str(r.get('username')) != username]
-            
+
             my_row = {"username": username, "config_json": json.dumps(new_data)}
-            
+
             # Rebuild Table: Others + Mine
             final_data = [[r['username'], r['config_json']] for r in others]
             final_data.append([my_row['username'], my_row['config_json']])
-            
+
             ws.clear()
             ws.append_row(["username", "config_json"])
             ws.append_rows(final_data)
-            
+
         elif key == "cheats":
             ws = sh.worksheet("Cheats")
             all_rows = ws.get_all_records()
             others = [r for r in all_rows if str(r.get('username')) != username]
-            
+
             my_row = {"username": username, "config_json": json.dumps(new_data)}
-            
+
             final_data = [[r['username'], r['config_json']] for r in others]
             final_data.append([my_row['username'], my_row['config_json']])
-            
+
             ws.clear()
             ws.append_row(["username", "config_json"])
             ws.append_rows(final_data)
-            
+
         elif key == "shopping":
             ws = sh.worksheet("Shopping")
             all_rows = ws.get_all_records()
             others = [r for r in all_rows if str(r.get('username')) != username]
-            
+
             # Convert my new data into rows
             my_rows = []
             for x in new_data:
                 my_rows.append({
                     "username": username,
-                    "item": x["item"], "qty": x["qty"], 
+                    "item": x["item"], "qty": x["qty"],
                     "category": x.get("category", "General"),
-                    "price_min": safe_float(x.get("price_min", 0)), 
-                    "price_max": safe_float(x.get("price_max", 0)), 
+                    "price_min": safe_float(x.get("price_min", 0)),
+                    "price_max": safe_float(x.get("price_max", 0)),
                     "bought": x["bought"]
                 })
-            
+
             # Combine
             export_rows = []
             for r in others:
                 export_rows.append([r['username'], r['item'], r['qty'], r['category'], r['price_min'], r['price_max'], r['bought']])
             for r in my_rows:
                 export_rows.append([r['username'], r['item'], r['qty'], r['category'], r['price_min'], r['price_max'], r['bought']])
-                
+
             ws.clear()
             ws.append_row(["username", "item", "qty", "category", "price_min", "price_max", "bought"])
             if export_rows: ws.append_rows(export_rows)
-            
+
     except Exception as e:
         st.warning(f"Cloud Save Error: {e}")
 
 # --- AI WRAPPER ---
 def ask_ai(prompt, image=None, json_mode=False):
+    # Mock Mode handling for AI
+    if 'api_client' in st.session_state and isinstance(st.session_state.api_client, MockClient):
+        if json_mode:
+            return json.dumps([{"item": "Mock Chicken", "category": "Protein", "price_min": 100, "price_max": 150}])
+        return "AI Response (Mock Mode): Here is your recipe or advice."
+
     if 'api_client' not in st.session_state or not st.session_state.api_client:
+        # Auto-connect mock if no key provided in sandbox
+        try:
+            if "gcp_service_account" not in st.secrets:
+                 st.session_state.api_client = MockClient()
+                 return ask_ai(prompt, image, json_mode)
+        except:
+             st.session_state.api_client = MockClient()
+             return ask_ai(prompt, image, json_mode)
+
         return None if json_mode else "⚠️ AI Offline. Connect API Key."
     try:
         c = [prompt]
         if image: c.append(image)
-        
+
         config = types.GenerateContentConfig(
             temperature=0.7,
             response_mime_type="application/json" if json_mode else "text/plain"
         )
-        
+
         res = st.session_state.api_client.models.generate_content(
             model="gemini-2.5-pro",
             contents=c,
@@ -230,7 +304,7 @@ if 'current_user' not in st.session_state:
 if not st.session_state.current_user:
     st.title("🔥 FitChef Pro")
     st.markdown("### Identify Yourself")
-    
+
     with st.container(border=True):
         username_input = st.text_input("Username", placeholder="e.g. Rahul")
         if st.button("Start Cooking", type="primary"):
@@ -276,15 +350,15 @@ if 'nav_selection' not in st.session_state: st.session_state.nav_selection = "�
 
 cols = st.columns(5)
 for i, option in enumerate(nav_options):
-    if cols[i].button(option): 
+    if cols[i].button(option):
         st.session_state.nav_selection = option
 
 selected_nav = st.session_state.nav_selection
 nav_map = {
-    "🏠 Home": "Dashboard", 
-    "💧 Fuel": "Fuel (Hydration)", 
-    "🛒 Plan": "Plan (Shopping)", 
-    "👨‍🍳 Chef": "Smart Chef", 
+    "🏠 Home": "Dashboard",
+    "💧 Fuel": "Fuel (Hydration)",
+    "🛒 Plan": "Plan (Shopping)",
+    "👨‍🍳 Chef": "Smart Chef",
     "😈 Cheat": "Cheat Negotiator"
 }
 nav = nav_map[selected_nav]
@@ -294,30 +368,44 @@ nav = nav_map[selected_nav]
 # =========================================================
 if nav == "Dashboard":
     st.header(f"Hello, {current_user}.")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    # Logic
+
+    # Gamification: Badges
     hydro = st.session_state.app_data['hydration']
+    goal = safe_float(hydro.get('daily_goal', 3000))
+    streak = calculate_streak(hydro.get('logs', []), goal)
+
+    badges = []
+    if streak >= 3: badges.append("💧 Hydration Hero")
+    if streak >= 7: badges.append("🔥 On Fire")
+
+    cheats = st.session_state.app_data['cheats']
+    if cheats['used_this_week'] == 0: badges.append("🥦 Clean Machine")
+
+    if badges:
+        st.success(f"**Achievements:** {' | '.join(badges)}")
+        if "🔥 On Fire" in badges:
+            st.toast("🔥 7-Day Streak! You are unstoppable!")
+
+    col1, col2, col3 = st.columns(3)
+
+    # Logic
     today_str = datetime.now().strftime("%Y-%m-%d")
     today_logs = [l for l in hydro.get('logs',[]) if l['date'] == today_str]
     total_today = sum([safe_float(l['amount']) for l in today_logs])
-    goal = safe_float(hydro.get('daily_goal', 3000))
     pct = int((total_today / goal) * 100) if goal > 0 else 0
-    
+
     with col1:
         st.metric("Hydration", f"{pct}%", f"{int(goal - total_today)}ml left")
 
-    cheats = st.session_state.app_data['cheats']
     left = cheats['weekly_limit'] - cheats['used_this_week']
     with col2:
         st.metric("Cheat Budget", f"{left} Left", f"{cheats['used_this_week']} used")
-        
+
     shop = st.session_state.app_data['shopping']
     pending = len([x for x in shop if not x['bought']])
     with col3:
         st.metric("Shopping", f"{pending} Items", "Pending")
-    
+
     st.divider()
     if pct < 50 and datetime.now().hour > 15:
         st.warning("📉 **Insight:** You are behind on hydration. Drink 500ml now.")
@@ -325,7 +413,7 @@ if nav == "Dashboard":
         st.error("⛔ **Insight:** No cheats left. Stay strict.")
     else:
         st.info("🚀 **Insight:** Solid pace today.")
-        
+
     # LOGOUT BUTTON (Moved here from Sidebar)
     if st.button("Log Out"):
         st.session_state.current_user = None
@@ -338,13 +426,13 @@ if nav == "Dashboard":
 elif nav == "Fuel (Hydration)":
     st.header("💧 Fuel Status")
     h_data = st.session_state.app_data['hydration']
-    
+
     with st.expander("⚙️ Calibrate Target"):
         w = st.number_input("Weight (kg)", value=float(h_data.get('weight', 70)))
         a = st.selectbox("Activity", ["Sedentary", "Moderate", "High"], index=1)
         rec_goal = (w * 35) + (500 if a != "Sedentary" else 0)
         st.caption(f"Recommended: {int(rec_goal)}ml")
-        
+
         new_goal = st.number_input("Goal", value=float(h_data.get('daily_goal', 3000)))
         if st.button("Save Calibration"):
             h_data['weight'] = w
@@ -355,12 +443,12 @@ elif nav == "Fuel (Hydration)":
 
     today_str = datetime.now().strftime("%Y-%m-%d")
     logs = [l for l in h_data.get('logs',[]) if l['date'] == today_str]
-    
+
     # Segmentation Logic
     morn = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) < 12])
     aft = sum([l['amount'] for l in logs if 12 <= int(l['time'].split(':')[0]) < 17])
     eve = sum([l['amount'] for l in logs if int(l['time'].split(':')[0]) >= 17])
-    
+
     c1, c2, c3 = st.columns(3)
     c1.metric("Morning", f"{morn}ml")
     c2.metric("Afternoon", f"{aft}ml")
@@ -369,16 +457,29 @@ elif nav == "Fuel (Hydration)":
     st.subheader("Quick Log")
     chip_vals = [150, 250, 350, 500]
     cols = st.columns(len(chip_vals) + 1)
-    
+
     for i, val in enumerate(chip_vals):
         if cols[i].button(f"+{val}ml"):
             if 'logs' not in h_data: h_data['logs'] = []
+
+            # Check if goal was NOT met before this add
+            current_total = sum([safe_float(l['amount']) for l in h_data['logs'] if l['date'] == today_str])
+            goal_val = safe_float(h_data.get('daily_goal', 3000))
+
             h_data['logs'].append({
                 "date": today_str,
                 "time": datetime.now().strftime("%H:%M"),
                 "amount": val
             })
             save_data_to_cloud("hydration", h_data, current_user)
+
+            # Check if goal IS met after this add
+            new_total = current_total + val
+            if current_total < goal_val and new_total >= goal_val:
+                st.balloons()
+                st.success("🎉 Daily Goal Reached!")
+                time.sleep(2)
+
             st.toast(f"Logged {val}ml")
             st.rerun()
 
@@ -388,32 +489,32 @@ elif nav == "Fuel (Hydration)":
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
     shop_list = st.session_state.app_data['shopping']
-    
+
     # Total Calculation
-    est_total = sum([ 
-        (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 
+    est_total = sum([
+        (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2
         for x in shop_list if not x['bought']
     ])
-    
+
     sc1, sc2 = st.columns([2, 1])
     sc1.metric("Est. Cart Value", f"₹{int(est_total)}")
-    
+
     with st.expander("Add Item (Manual)", expanded=True):
         c_item, c_qty, c_unit, c_btn = st.columns([3, 1, 1, 1])
-        
+
         new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken")
         new_qty_num = c_qty.number_input("Qty", min_value=0.1, step=0.5, value=1.0)
         uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen", "can"]
         new_unit = c_unit.selectbox("Unit", uom_options)
-        
+
         if c_btn.button("Add"):
             if new_item:
                 final_qty_str = f"{new_qty_num} {new_unit}"
                 shop_list.append({
-                    "item": new_item, 
-                    "qty": final_qty_str, 
-                    "category": "General", 
-                    "price_min": 0, "price_max": 0, 
+                    "item": new_item,
+                    "qty": final_qty_str,
+                    "category": "General",
+                    "price_min": 0, "price_max": 0,
                     "bought": False
                 })
                 save_data_to_cloud("shopping", shop_list, current_user)
@@ -428,12 +529,12 @@ elif nav == "Plan (Shopping)":
         for item in items:
             if item['bought']: continue
             rc1, rc2, rc3 = st.columns([0.5, 3, 1])
-            
+
             if rc1.checkbox("", key=f"chk_{item['item']}"):
                 item['bought'] = True
                 save_data_to_cloud("shopping", shop_list, current_user)
                 st.rerun()
-            
+
             rc2.write(f"**{item['item']}** ({item['qty']})")
             p_min = safe_float(item.get('price_min',0))
             p_max = safe_float(item.get('price_max',0))
@@ -448,8 +549,8 @@ elif nav == "Plan (Shopping)":
                 prompt = f"""
                 You are a grocery price estimator for Hyderabad.
                 Items: {items_txt}
-                Task: 
-                1. Categorize (Protein, Veg, etc). 
+                Task:
+                1. Categorize (Protein, Veg, etc).
                 2. Estimate TOTAL price for SPECIFIC QUANTITY (e.g. 500g Chicken = 120 INR, not 1kg price).
                 Return JSON list: [{{ "item": "name", "category": "Protein", "price_min": 100, "price_max": 120 }}]
                 """
@@ -474,7 +575,7 @@ elif nav == "Plan (Shopping)":
 # =========================================================
 elif nav == "Smart Chef":
     st.header("👨‍🍳 Smart Chef")
-    
+
     with st.container(border=True):
         detected = st.session_state.get('detected', "")
         use_cam = st.toggle("Use Camera")
@@ -484,9 +585,9 @@ elif nav == "Smart Chef":
                 res = ask_ai("List visible ingredients. Comma separated.", Image.open(img))
                 st.session_state['detected'] = res
                 st.rerun()
-        
+
         ingredients = st.text_area("Ingredients", value=detected)
-    
+
     # Constraints
     cc1, cc2, cc3 = st.columns(3)
     goal = cc1.selectbox("Goal", ["High Protein", "Fat Loss", "Bulking"])
@@ -529,12 +630,12 @@ elif nav == "Cheat Negotiator":
     c_data = st.session_state.app_data['cheats']
     used = c_data['used_this_week']
     limit = c_data['weekly_limit']
-    
+
     st.progress(used/limit if limit > 0 else 0)
     st.caption(f"Used: {used}/{limit}")
-    
+
     if used >= limit: st.error("⛔ BUDGET EXCEEDED.")
-        
+
     want = st.text_input("I want...")
     if st.button("Judge Me"):
          p = f"""
@@ -545,9 +646,10 @@ elif nav == "Cheat Negotiator":
          ## 🟩 Damage Control (If eaten)
          Verdict: APPROVED or DENIED.
          """
-         res = ask_ai(p)
+         with st.spinner("🧑‍⚖️ The Judge is deciding your fate..."):
+             res = ask_ai(p)
          st.session_state['judge'] = res
-         
+
     if st.session_state.get('judge'):
         st.markdown(st.session_state['judge'])
         c1, c2 = st.columns(2)
