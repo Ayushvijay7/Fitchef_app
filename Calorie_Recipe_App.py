@@ -270,37 +270,33 @@ elif nav == "Fuel (Hydration)":
             st.rerun()
 
 # =========================================================
-# 3. PLAN (SHOPPING) - FIXED
+# 3. PLAN (SHOPPING) - FIXED & ACCURATE
 # =========================================================
 elif nav == "Plan (Shopping)":
     st.header("🛒 Smart Grocery Plan")
     shop_list = st.session_state.app_data['shopping']
     
-    # Calculate Total
+    # --- MATH FIX: Sum only the line item totals (AI handles the quantity math) ---
     est_total = sum([ 
-        (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 * safe_parse_qty(x['qty']) 
+        (safe_float(x.get('price_min', 0)) + safe_float(x.get('price_max',0)))/2 
         for x in shop_list if not x['bought']
     ])
     
     sc1, sc2 = st.columns([2, 1])
     sc1.metric("Est. Cart Value", f"₹{int(est_total)}")
     
-    # --- FIX 1: Split Unit Input ---
+    # Add Item (Manual)
     with st.expander("Add Item (Manual)", expanded=True):
         c_item, c_qty, c_unit, c_btn = st.columns([3, 1, 1, 1])
         
         new_item = c_item.text_input("Item Name", placeholder="e.g. Chicken Breast")
-        # Numeric input for quantity
         new_qty_num = c_qty.number_input("Qty", min_value=0.1, step=0.5, value=1.0)
-        # Dropdown for UoM
         uom_options = ["kg", "g", "L", "ml", "pcs", "pack", "dozen", "can", "tbsp", "tsp"]
         new_unit = c_unit.selectbox("Unit", uom_options)
         
         if c_btn.button("Add"):
             if new_item:
-                # Combine them for storage (e.g., "1.5 kg")
                 final_qty_str = f"{new_qty_num} {new_unit}"
-                
                 shop_list.append({
                     "item": new_item, 
                     "qty": final_qty_str, 
@@ -327,41 +323,50 @@ elif nav == "Plan (Shopping)":
                 save_data_to_cloud("shopping", shop_list)
                 st.rerun()
             
+            # Display
             rc2.write(f"**{item['item']}** ({item['qty']})")
-            p_avg = (safe_float(item.get('price_min',0)) + safe_float(item.get('price_max',0)))/2
-            rc3.caption(f"₹{int(p_avg)}" if p_avg > 0 else "-")
+            
+            p_min = safe_float(item.get('price_min',0))
+            p_max = safe_float(item.get('price_max',0))
+            p_avg = (p_min + p_max)/2
+            
+            if p_avg > 0:
+                rc3.caption(f"₹{int(p_min)} - ₹{int(p_max)}")
+            else:
+                rc3.caption("-")
 
-    # --- FIX 2: AI Parse Error Fix (JSON Mode) ---
+    # --- ACCURACY FIX: Updated Prompt ---
     if st.button("🤖 Analyze & Price (AI)"):
         if not st.session_state.get('is_verified'): 
             st.error("Connect AI first")
         else:
-            with st.spinner("Analyzing..."):
-                items_txt = ", ".join([x['item'] for x in shop_list if not x['bought']])
+            with st.spinner("Checking Hyderabad market rates..."):
+                # We send the Item AND the Quantity to the AI
+                items_txt = ", ".join([f"{x['item']} ({x['qty']})" for x in shop_list if not x['bought']])
                 
-                # We simply ask for the list, but we pass json_mode=True to ask_ai
                 prompt = f"""
                 You are a grocery price estimator for Hyderabad, India.
-                Items: {items_txt}
+                Items to price: {items_txt}
                 
-                Return a JSON list of objects with these keys:
-                - item (exact name from input)
-                - category (Protein, Veg, Grain, Dairy, Staple, Junk, General)
-                - price_min (estimated price per unit in INR)
-                - price_max (estimated price per unit in INR)
+                Task:
+                1. Categorize items (Protein, Veg, Grain, Dairy, Staple, Junk, General).
+                2. Estimate the TOTAL price for the SPECIFIC QUANTITY listed (e.g. if '500g Chicken', give price for 500g, NOT 1kg).
+                3. Use realistic local market rates (e.g. Chicken ~240/kg, Milk ~60/L).
+                
+                Return JSON list:
+                [
+                  {{ "item": "exact name from input", "category": "Protein", "price_min": 100, "price_max": 120 }}
+                ]
                 """
                 
-                # Pass json_mode=True to force strict JSON output
                 res = ask_ai(prompt, json_mode=True)
                 
                 try:
-                    # It returns valid JSON now, so we can load it directly
                     updates = json.loads(res)
-                    
                     match_count = 0
                     for u in updates:
                         for x in shop_list:
-                            # Fuzzy matching item names
+                            # Fuzzy match item name
                             if x['item'].lower() in u['item'].lower():
                                 x['category'] = u['category']
                                 x['price_min'] = u['price_min']
@@ -370,12 +375,10 @@ elif nav == "Plan (Shopping)":
                                 
                     save_data_to_cloud("shopping", shop_list)
                     st.success(f"Updated prices for {match_count} items!")
-                    time.sleep(1) # Pause so user sees success msg
+                    time.sleep(1)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Analysis Failed: {str(e)}")
-                    st.caption("Raw AI Response (Debug): " + str(res))
-
 # =========================================================
 # 4. SMART CHEF
 # =========================================================
@@ -432,3 +435,4 @@ elif nav == "Cheat Negotiator":
             c_data['used_this_week'] += 1
             save_data_to_cloud("cheats", c_data)
             st.rerun()
+
